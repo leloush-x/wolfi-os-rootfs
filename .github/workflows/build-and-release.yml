@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v2.0.0)'
+        description: 'Version tag (e.g., v3.0.0)'
         required: true
-        default: 'v2.0.0'
+        default: 'v3.0.0'
 
   schedule:
     - cron: '0 0 * * 0'
@@ -36,15 +36,14 @@ jobs:
           mkdir -p output
 
           # Packages to pre-install
-          PACKAGES="bash curl git wget nodejs npm fastfetch nano sudo"
+          PACKAGES="bash curl git wget nodejs npm fastfetch nano sudo util-linux"
 
           # ---- aarch64 ----
           echo ""
           echo "📦 [1/2] Building for aarch64 (ARM64)..."
           docker pull --platform linux/arm64 cgr.dev/chainguard/wolfi-base:latest
           docker run -d --platform linux/arm64 --name wolfi-arm64 cgr.dev/chainguard/wolfi-base:latest sleep 3600
-          docker exec wolfi-arm64 /bin/sh -c "apk update && apk add --no-cache $PACKAGES && rm -rf /var/cache/apk/*"
-          docker exec wolfi-arm64 /bin/sh -c "rm -rf /tmp/* /var/tmp/* /var/log/*"
+          docker exec wolfi-arm64 /bin/sh -c "apk update && apk add --no-cache $PACKAGES && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/*"
           docker stop wolfi-arm64
           docker export wolfi-arm64 | gzip > output/wolfi-rootfs-aarch64.tar.gz
           docker rm wolfi-arm64
@@ -55,8 +54,7 @@ jobs:
           echo "📦 [2/2] Building for x86_64..."
           docker pull --platform linux/amd64 cgr.dev/chainguard/wolfi-base:latest
           docker run -d --platform linux/amd64 --name wolfi-amd64 cgr.dev/chainguard/wolfi-base:latest sleep 3600
-          docker exec wolfi-amd64 /bin/sh -c "apk update && apk add --no-cache $PACKAGES && rm -rf /var/cache/apk/*"
-          docker exec wolfi-amd64 /bin/sh -c "rm -rf /tmp/* /var/tmp/* /var/log/*"
+          docker exec wolfi-amd64 /bin/sh -c "apk update && apk add --no-cache $PACKAGES && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/*"
           docker stop wolfi-amd64
           docker export wolfi-amd64 | gzip > output/wolfi-rootfs-x86_64.tar.gz
           docker rm wolfi-amd64
@@ -85,7 +83,7 @@ jobs:
             Built from: `cgr.dev/chainguard/wolfi-base:latest`
 
             ### 📦 Pre-installed packages
-            `bash` `curl` `git` `wget` `nodejs` `npm` `fastfetch` `nano` `sudo`
+            `bash` `curl` `git` `wget` `nodejs` `npm` `fastfetch` `nano` `sudo` `util-linux`
 
             Install more with:
             ```bash
