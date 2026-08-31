@@ -27,16 +27,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Wolfi rootfs for all architectures
+      - name: Build Wolfi rootfs for supported architectures
         run: |
           echo "🐺 Building Wolfi Rootfs for Termix"
           echo "===================================="
+          echo ""
+          echo "⚠️  Wolfi only supports amd64 and arm64 (no armv7)"
           echo ""
           
           mkdir -p output
           
           # ---- aarch64 (most Android phones) ----
-          echo "📦 [1/3] Building for aarch64 (ARM64)..."
+          echo "📦 [1/2] Building for aarch64 (ARM64)..."
           docker pull --platform linux/arm64 cgr.dev/chainguard/wolfi-base:latest
           cid=$(docker create --platform linux/arm64 cgr.dev/chainguard/wolfi-base:latest)
           docker export "$cid" | gzip > output/wolfi-rootfs-aarch64.tar.gz
@@ -45,21 +47,12 @@ jobs:
           echo ""
           
           # ---- x86_64 (emulators / ChromeOS) ----
-          echo "📦 [2/3] Building for x86_64..."
+          echo "📦 [2/2] Building for x86_64..."
           docker pull --platform linux/amd64 cgr.dev/chainguard/wolfi-base:latest
           cid=$(docker create --platform linux/amd64 cgr.dev/chainguard/wolfi-base:latest)
           docker export "$cid" | gzip > output/wolfi-rootfs-x86_64.tar.gz
           docker rm "$cid"
           echo "   ✅ x86_64: $(du -h output/wolfi-rootfs-x86_64.tar.gz | cut -f1)"
-          echo ""
-          
-          # ---- armv7 (older ARM devices) ----
-          echo "📦 [3/3] Building for armv7 (ARM32)..."
-          docker pull --platform linux/arm/v7 cgr.dev/chainguard/wolfi-base:latest
-          cid=$(docker create --platform linux/arm/v7 cgr.dev/chainguard/wolfi-base:latest)
-          docker export "$cid" | gzip > output/wolfi-rootfs-armv7.tar.gz
-          docker rm "$cid"
-          echo "   ✅ armv7: $(du -h output/wolfi-rootfs-armv7.tar.gz | cut -f1)"
           echo ""
           
           echo "🎉 All builds complete!"
@@ -92,7 +85,8 @@ jobs:
             |------|-------------|---------|
             | `wolfi-rootfs-aarch64.tar.gz` | ARM64 | Most modern Android phones |
             | `wolfi-rootfs-x86_64.tar.gz` | x86_64 | Emulators, ChromeOS |
-            | `wolfi-rootfs-armv7.tar.gz` | ARM32 | Older Android devices |
+            
+            > ⚠️ Note: Wolfi does not support ARM32 (armv7). Use Alpine for older devices.
             
             ---
             

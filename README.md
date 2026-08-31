@@ -14,7 +14,8 @@ Wolfi is a secure, container-optimized Linux distribution from [Chainguard](http
 |------|-------------|
 | `wolfi-rootfs-aarch64.tar.gz` | ARM64 (most phones) |
 | `wolfi-rootfs-x86_64.tar.gz` | x86_64 (emulators) |
-| `wolfi-rootfs-armv7.tar.gz` | ARM32 (older devices) |
+
+> ⚠️ Wolfi does not support ARM32 (armv7). Use Alpine for older devices.
 
 ## 🔄 How it works
 
