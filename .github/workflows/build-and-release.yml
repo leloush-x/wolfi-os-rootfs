@@ -1,15 +1,13 @@
 name: Build & Release Wolfi Rootfs
 
 on:
-  # Manual trigger - click "Run workflow" to build
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (e.g., v1.0.0)'
+        description: 'Version tag (e.g., v2.0.0)'
         required: true
-        default: 'v1.0.0'
+        default: 'v2.0.0'
 
-  # Auto-build every Sunday (keep Wolfi updated)
   schedule:
     - cron: '0 0 * * 0'
 
@@ -19,50 +17,51 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for multi-arch builds)
-        uses: docker/setup-qemu-action@v3
+      - name: Set up QEMU
+        uses: actions/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Wolfi rootfs for supported architectures
+      - name: Build Wolfi rootfs with pre-installed packages
         run: |
           echo "🐺 Building Wolfi Rootfs for Termix"
           echo "===================================="
-          echo ""
-          echo "⚠️  Wolfi only supports amd64 and arm64 (no armv7)"
-          echo ""
-          
+
           mkdir -p output
-          
-          # ---- aarch64 (most Android phones) ----
+
+          # Packages to pre-install
+          PACKAGES="bash curl git wget nodejs npm fastfetch nano sudo"
+
+          # ---- aarch64 ----
+          echo ""
           echo "📦 [1/2] Building for aarch64 (ARM64)..."
-          docker pull --platform linux/arm64 cgr.dev/chainguard/wolfi-base:latest
-          cid=$(docker create --platform linux/arm64 cgr.dev/chainguard/wolfi-base:latest)
-          docker export "$cid" | gzip > output/wolfi-rootfs-aarch64.tar.gz
-          docker rm "$cid"
+          docker run --platform linux/arm64 --name wolfi-arm64 cgr.dev/chainguard/wolfi-base:latest /bin/sh -c \
+            "apk update && apk add --no-cache $PACKAGES && rm -rf /var/cache/apk/*"
+          docker export wolfi-arm64 | gzip > output/wolfi-rootfs-aarch64.tar.gz
+          docker rm wolfi-arm64
           echo "   ✅ aarch64: $(du -h output/wolfi-rootfs-aarch64.tar.gz | cut -f1)"
+
+          # ---- x86_64 ----
           echo ""
-          
-          # ---- x86_64 (emulators / ChromeOS) ----
           echo "📦 [2/2] Building for x86_64..."
-          docker pull --platform linux/amd64 cgr.dev/chainguard/wolfi-base:latest
-          cid=$(docker create --platform linux/amd64 cgr.dev/chainguard/wolfi-base:latest)
-          docker export "$cid" | gzip > output/wolfi-rootfs-x86_64.tar.gz
-          docker rm "$cid"
+          docker run --platform linux/amd64 --name wolfi-amd64 cgr.dev/chainguard/wolfi-base:latest /bin/sh -c \
+            "apk update && apk add --no-cache $PACKAGES && rm -rf /var/cache/apk/*"
+          docker export wolfi-amd64 | gzip > output/wolfi-rootfs-x86_64.tar.gz
+          docker rm wolfi-amd64
           echo "   ✅ x86_64: $(du -h output/wolfi-rootfs-x86_64.tar.gz | cut -f1)"
+
           echo ""
-          
           echo "🎉 All builds complete!"
           echo ""
           ls -lh output/
 
-      - name: Upload artifacts (for inspection)
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wolfi-rootfs-${{ github.run_id }}
@@ -76,41 +75,25 @@ jobs:
           name: "Wolfi Rootfs ${{ github.event.inputs.version || 'latest' }}"
           body: |
             🐺 **Wolfi Linux Rootfs for Termix**
-            
+
             Built from: `cgr.dev/chainguard/wolfi-base:latest`
-            Package manager: `apk` (same as Alpine)
-            
-            ---
-            
+
+            ### 📦 Pre-installed packages
+            `bash` `curl` `git` `wget` `nodejs` `npm` `fastfetch` `nano` `sudo`
+
+            Install more with:
+            ```bash
+            apk add <package>
+            ```
+
             ### 📥 Downloads
-            
+
             | File | Architecture | Use for |
             |------|-------------|---------|
             | `wolfi-rootfs-aarch64.tar.gz` | ARM64 | Most modern Android phones |
             | `wolfi-rootfs-x86_64.tar.gz` | x86_64 | Emulators, ChromeOS |
-            
-            > ⚠️ Note: Wolfi does not support ARM32 (armv7). Use Alpine for older devices.
-            
-            ---
-            
-            ### 🔧 Usage in Termix
-            
-            1. Download the file matching your device's CPU
-            2. Place it in Termix app data directory
-            3. Termix will auto-detect and extract it
-            
-            ---
-            
-            ### 📦 What's inside
-            
-            - Minimal Wolfi base system
-            - `apk` package manager
-            - Shell: `/bin/sh` (busybox)
-            
-            Install packages with:
-            ```bash
-            apk add bash git curl wget
-            ```
+
+            > ⚠️ Wolfi does not support ARM32 (armv7).
           files: output/*.tar.gz
           draft: false
           prerelease: false
