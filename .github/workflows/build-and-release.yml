@@ -36,7 +36,7 @@ jobs:
           mkdir -p output
 
           # Packages to pre-install
-          PACKAGES="bash curl git wget nodejs npm fastfetch nano sudo util-linux"
+          PACKAGES="fastfetch curl git"
 
           # ---- aarch64 ----
           echo ""
@@ -83,7 +83,7 @@ jobs:
             Built from: `cgr.dev/chainguard/wolfi-base:latest`
 
             ### 📦 Pre-installed packages
-            `bash` `curl` `git` `wget` `nodejs` `npm` `fastfetch` `nano` `sudo` `util-linux`
+            `fastfetch` `curl` `git`
 
             Install more with:
             ```bash
