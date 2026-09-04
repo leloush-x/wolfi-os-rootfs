@@ -45,8 +45,14 @@ jobs:
           docker run -d --platform linux/arm64 --name wolfi-arm64 cgr.dev/chainguard/wolfi-base:latest sleep 3600
           docker exec wolfi-arm64 /bin/sh -c "apk update && apk add --no-cache $PACKAGES && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/*"
           docker stop wolfi-arm64
-          docker export wolfi-arm64 | gzip > output/wolfi-rootfs-aarch64.tar.gz
+          docker export wolfi-arm64 -o output/wolfi-rootfs-aarch64.tar
           docker rm wolfi-arm64
+          # Strip container-only entries: /dev nodes (proot on Android cannot
+          # mknod them -> "tar: can't create 'dev/null': Operation not permitted";
+          # /dev is bind-mounted from the host anyway) plus docker junk
+          # (.dockerenv, build-host hostname/hosts/resolv.conf).
+          tar --delete -f output/wolfi-rootfs-aarch64.tar dev .dockerenv etc/hostname etc/hosts etc/resolv.conf
+          gzip -f output/wolfi-rootfs-aarch64.tar
           echo "   ✅ aarch64: $(du -h output/wolfi-rootfs-aarch64.tar.gz | cut -f1)"
 
           # ---- x86_64 ----
@@ -56,8 +62,10 @@ jobs:
           docker run -d --platform linux/amd64 --name wolfi-amd64 cgr.dev/chainguard/wolfi-base:latest sleep 3600
           docker exec wolfi-amd64 /bin/sh -c "apk update && apk add --no-cache $PACKAGES && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/*"
           docker stop wolfi-amd64
-          docker export wolfi-amd64 | gzip > output/wolfi-rootfs-x86_64.tar.gz
+          docker export wolfi-amd64 -o output/wolfi-rootfs-x86_64.tar
           docker rm wolfi-amd64
+          tar --delete -f output/wolfi-rootfs-x86_64.tar dev .dockerenv etc/hostname etc/hosts etc/resolv.conf
+          gzip -f output/wolfi-rootfs-x86_64.tar
           echo "   ✅ x86_64: $(du -h output/wolfi-rootfs-x86_64.tar.gz | cut -f1)"
 
           echo ""
