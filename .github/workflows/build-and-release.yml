@@ -36,14 +36,14 @@ jobs:
           mkdir -p output
 
           # Packages to pre-install
-          PACKAGES="fastfetch curl git"
+          PACKAGES="fastfetch curl git bash"
 
           # ---- aarch64 ----
           echo ""
           echo "📦 [1/2] Building for aarch64 (ARM64)..."
           docker pull --platform linux/arm64 cgr.dev/chainguard/wolfi-base:latest
           docker run -d --platform linux/arm64 --name wolfi-arm64 cgr.dev/chainguard/wolfi-base:latest sleep 3600
-          docker exec wolfi-arm64 /bin/sh -c "apk update && apk add --no-cache $PACKAGES && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/*"
+          docker exec wolfi-arm64 /bin/sh -c "apk update && apk add --no-cache $PACKAGES && ln -sf /bin/bash /bin/sh && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/*"
           docker stop wolfi-arm64
           docker export wolfi-arm64 -o output/wolfi-rootfs-aarch64.tar
           docker rm wolfi-arm64
@@ -60,7 +60,7 @@ jobs:
           echo "📦 [2/2] Building for x86_64..."
           docker pull --platform linux/amd64 cgr.dev/chainguard/wolfi-base:latest
           docker run -d --platform linux/amd64 --name wolfi-amd64 cgr.dev/chainguard/wolfi-base:latest sleep 3600
-          docker exec wolfi-amd64 /bin/sh -c "apk update && apk add --no-cache $PACKAGES && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/*"
+          docker exec wolfi-amd64 /bin/sh -c "apk update && apk add --no-cache $PACKAGES && ln -sf /bin/bash /bin/sh && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/*"
           docker stop wolfi-amd64
           docker export wolfi-amd64 -o output/wolfi-rootfs-x86_64.tar
           docker rm wolfi-amd64
@@ -91,7 +91,7 @@ jobs:
             Built from: `cgr.dev/chainguard/wolfi-base:latest`
 
             ### 📦 Pre-installed packages
-            `fastfetch` `curl` `git`
+            `fastfetch` `curl` `git` `bash`
 
             Install more with:
             ```bash
