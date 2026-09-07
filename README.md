@@ -1,6 +1,6 @@
 # 🐺 Wolfi OS Rootfs for Termix
 
-Automated builds of [Wolfi Linux](https://github.com/wolfi-dev/os) rootfs for use in [Termix](https://github.com/jeffusion/Termix) terminal emulator.
+Automated builds of [Wolfi Linux](https://github.com/wolfi-dev/os) rootfs for use in [Termix](https://github.com/RohitKushvaha01/ReTerminal) terminal emulator.
 
 ## What is this?
 
