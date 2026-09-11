@@ -129,7 +129,7 @@ jobs:
             Built from `cgr.dev/chainguard/wolfi-base:latest` (Digest: `${{ needs.check-update.outputs.short_digest }}`)
 
             ### 📦 Pre-installed packages
-            `fastfetch` `curl` `git` `gh` `bash`
+            `fastfetch` `curl` `git` `gh` `bash` `openssh`
 
             Install more with:
             ```bash
