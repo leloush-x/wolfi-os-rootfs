@@ -77,7 +77,7 @@ jobs:
           mkdir -p output
 
           # Packages to pre-install
-          PACKAGES="fastfetch curl git gh bash"
+          PACKAGES="fastfetch curl git gh bash openssh"
 
           # ---- aarch64 ----
           echo ""
@@ -129,7 +129,7 @@ jobs:
             Built from `cgr.dev/chainguard/wolfi-base:latest` (Digest: `${{ needs.check-update.outputs.short_digest }}`)
 
             ### 📦 Pre-installed packages
-            `fastfetch` `curl` `git` `gh` `bash` `openssh`
+            `fastfetch` `curl` `git` `gh` `bash` `openssh` `sftp`
 
             Install more with:
             ```bash
