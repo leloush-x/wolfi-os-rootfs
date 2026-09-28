@@ -1,251 +1,211 @@
-name: Build & Release Wolfi Rootfs
+name: Build & Release Multi-Distro Rootfs
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag (Optional: leaves empty to auto-generate based on image digest)'
+        description: 'Custom release tag (leave empty for auto-generated digest hash)'
         required: false
         default: ''
 
   schedule:
+    # Runs daily at midnight UTC
     - cron: '0 0 * * *'
 
 permissions:
   contents: write
-
-env:
-  WOLFI_IMAGE: cgr.dev/chainguard/wolfi-base:latest
-  VOID_IMAGE: ghcr.io/void-linux/void-glibc-busybox:latest
-  DEBIAN_IMAGE: debian:slim
 
 jobs:
   check-update:
     runs-on: ubuntu-latest
     outputs:
       needs-build: ${{ steps.check.outputs.needs_build }}
-      short_digest: ${{ steps.get_digest.outputs.short_digest }}
+      release_tag: ${{ steps.get_digest.outputs.release_tag }}
     steps:
-      - name: Get latest Wolfi base digest
+      - name: Calculate Upstream Image Fingerprint
         id: get_digest
         run: |
-          DIGEST=$(skopeo inspect docker://cgr.dev/chainguard/wolfi-base:latest | jq -r '.Digest')
-          SHORT_DIGEST=$(echo $DIGEST | cut -d':' -f2 | cut -c1-12)
-          echo "short_digest=$SHORT_DIGEST" >> $GITHUB_OUTPUT
-          echo "Found latest Wolfi digest: $SHORT_DIGEST"
+          # Query image manifests without pulling full image layers
+          WOLFI_DIGEST=$(skopeo inspect docker://cgr.dev/chainguard/wolfi-base:latest | jq -r '.Digest // empty')
+          DEBIAN_DIGEST=$(skopeo inspect docker://debian:bookworm-slim | jq -r '.Digest // empty')
+          VOID_DIGEST=$(skopeo inspect docker://ghcr.io/void-linux/void-linux:latest-glibc | jq -r '.Digest // empty')
 
-      - name: Check if release already exists
+          echo "Wolfi:  $WOLFI_DIGEST"
+          echo "Debian: $DEBIAN_DIGEST"
+          echo "Void:   $VOID_DIGEST"
+
+          # Create a consolidated short hash of all three upstream states
+          BUNDLE_HASH=$(echo -n "${WOLFI_DIGEST}:${DEBIAN_DIGEST}:${VOID_DIGEST}" | sha256sum | cut -c1-12)
+          RELEASE_TAG="distros-${BUNDLE_HASH}"
+          
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "Target Release Tag: $RELEASE_TAG"
+
+      - name: Evaluate Build Necessity
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "Manual trigger detected. Forcing build."
+            echo "Manual execution triggered. Proceeding with build."
             echo "needs_build=true" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          if gh release view "wolfi-${{ steps.get_digest.outputs.short_digest }}" --repo ${{ github.repository }} > /dev/null 2>&1; then
-            echo "Release wolfi-${{ steps.get_digest.outputs.short_digest }} already exists. Skipping."
+          TARGET_TAG="${{ steps.get_digest.outputs.release_tag }}"
+          if gh release view "$TARGET_TAG" --repo ${{ github.repository }} > /dev/null 2>&1; then
+            echo "✅ Release $TARGET_TAG already exists and is up-to-date. Skipping."
             echo "needs_build=false" >> $GITHUB_OUTPUT
           else
-            echo "New Wolfi base image detected. Build required."
+            echo "🚨 New upstream image versions detected. Triggering build matrix."
             echo "needs_build=true" >> $GITHUB_OUTPUT
           fi
 
-  build-wolfi:
+  build:
     needs: check-update
     if: needs.check-update.outputs.needs-build == 'true'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - name: wolfi
+            image: cgr.dev/chainguard/wolfi-base:latest
+            # Wolfi apk package bootstrap
+            cmd: >-
+              apk update && apk upgrade &&
+              apk add --no-cache fastfetch curl git gh bash openssh &&
+              ln -sf /bin/bash /bin/sh &&
+              rm -f /etc/resolv.conf /etc/hosts /etc/hostname &&
+              printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf &&
+              rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/*
+
+          - name: debian
+            image: debian:bookworm-slim
+            # Debian apt package bootstrap (avoids package not found traps)
+            cmd: >-
+              apt-get update &&
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends
+              ca-certificates curl git bash openssh-client procps less nano &&
+              rm -f /etc/resolv.conf /etc/hosts /etc/hostname &&
+              printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf &&
+              rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /var/log/*
+
+          - name: void
+            image: ghcr.io/void-linux/void-linux:latest-glibc
+            # Void xbps package bootstrap (updates xbps itself first to prevent ABI issues)
+            cmd: >-
+              xbps-install -Syu xbps &&
+              xbps-install -Syu &&
+              xbps-install -y ca-certificates curl git bash openssh less nano &&
+              rm -f /etc/resolv.conf /etc/hosts /etc/hostname &&
+              printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > /etc/resolv.conf &&
+              rm -rf /var/cache/xbps/* /tmp/* /var/tmp/* /var/log/*
+
+        arch:
+          - id: aarch64
+            platform: linux/arm64
+          - id: x86_64
+            platform: linux/amd64
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - name: Build Wolfi rootfs
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Rootfs Tarball
         run: |
-          echo "Building Wolfi Rootfs for Termix"
-          mkdir -p output
-          PACKAGES="fastfetch curl git gh bash openssh"
+          DISTRO="${{ matrix.distro.name }}"
+          ARCH="${{ matrix.arch.id }}"
+          PLATFORM="${{ matrix.arch.platform }}"
+          IMAGE="${{ matrix.distro.image }}"
+          CONTAINER_NAME="build-${DISTRO}-${ARCH}"
+          TAR_NAME="${DISTRO}-rootfs-${ARCH}.tar"
 
-          build_one() {
-            local platform="$1" name="$2" arch="$3"
-            echo "Wolfi $arch"
-            docker pull --platform "$platform" cgr.dev/chainguard/wolfi-base:latest
-            docker run -d --platform "$platform" --name "$name" cgr.dev/chainguard/wolfi-base:latest sleep 3600
-            docker exec "$name" /bin/sh -c "apk update && apk upgrade && apk add --no-cache $PACKAGES && ln -sf /bin/bash /bin/sh && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/* /usr/share/doc/* /usr/share/man/*"
-            docker stop "$name"
-            docker export "\( name" -o "output/wolfi-rootfs- \){arch}.tar"
-            docker rm "$name"
-            tar --delete -f "output/wolfi-rootfs-${arch}.tar" dev .dockerenv etc/hostname etc/hosts etc/resolv.conf || true
-            gzip -f "output/wolfi-rootfs-${arch}.tar"
-            echo "  $arch: \( (du -h output/wolfi-rootfs- \){arch}.tar.gz | cut -f1)"
-          }
+          mkdir -p dist
 
-          build_one linux/arm64 wolfi-arm64 aarch64
-          build_one linux/amd64 wolfi-amd64 x86_64
-          ls -lh output/
+          echo "🚀 Pulling $IMAGE for$PLATFORM..."
+          docker pull --platform "$PLATFORM" "$IMAGE"
 
-      - uses: actions/upload-artifact@v4
+          echo "🛠️ Creating container $CONTAINER_NAME..."
+          docker run -d --platform "$PLATFORM" --name "$CONTAINER_NAME" "$IMAGE" sleep 3600
+
+          echo "📦 Executing package setup..."
+          docker exec "$CONTAINER_NAME" /bin/sh -c "${{ matrix.distro.cmd }}"
+
+          echo "💾 Exporting root filesystem..."
+          docker stop "$CONTAINER_NAME"
+          docker export "$CONTAINER_NAME" -o "dist/${TAR_NAME}"
+          docker rm "$CONTAINER_NAME"
+
+          echo "🧹 Sanitizing PRoot/Termix paths safely..."
+          # Strip host/docker artifacts; ignore exit code if an entry does not exist to prevent aborting
+          tar --delete -f "dist/${TAR_NAME}" dev .dockerenv 2>/dev/null || true
+
+          echo "🗜️ Compressing to gzip..."
+          gzip -9 -f "dist/${TAR_NAME}"
+
+          echo "Artifact created: dist/${TAR_NAME}.gz ($(du -h dist/${TAR_NAME}.gz | cut -f1))"
+
+      - name: Upload Single Rootfs Artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: wolfi-rootfs
-          path: output/*.tar.gz
-          retention-days: 3
+          name: ${{ matrix.distro.name }}-rootfs-${{ matrix.arch.id }}
+          path: dist/*.tar.gz
+          retention-days: 1
 
-  build-void:
-    needs: check-update
-    if: needs.check-update.outputs.needs-build == 'true'
+  publish:
+    needs: [check-update, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build Void glibc busybox (ultra thin) rootfs
-        run: |
-          echo "Building Void glibc-busybox Rootfs for Termix"
-          mkdir -p output
-          PACKAGES="fastfetch curl git github-cli bash openssh"
-
-          build_one() {
-            local platform="$1" name="$2" arch="$3"
-            echo "Void busybox $arch"
-            docker pull --platform "$platform" ghcr.io/void-linux/void-glibc-busybox:latest
-            docker run -d --platform "$platform" --name "$name" ghcr.io/void-linux/void-glibc-busybox:latest sleep 3600
-            docker exec "$name" /bin/sh -c "
-              xbps-install -Syu
-              xbps-install -y $PACKAGES
-              ln -sf /bin/bash /bin/sh
-              rm -rf /var/cache/xbps/* /tmp/* /var/tmp/* /var/log/* \
-                     /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
-                     /usr/share/locale/* /usr/share/licenses/*
-            "
-            docker stop "$name"
-            docker export "\( name" -o "output/void-glibc-rootfs- \){arch}.tar"
-            docker rm "$name"
-            tar --delete -f "output/void-glibc-rootfs-${arch}.tar" dev .dockerenv etc/hostname etc/hosts etc/resolv.conf || true
-            gzip -f "output/void-glibc-rootfs-${arch}.tar"
-            echo "  $arch: \( (du -h output/void-glibc-rootfs- \){arch}.tar.gz | cut -f1)"
-          }
-
-          build_one linux/arm64 void-arm64 aarch64
-          build_one linux/amd64 void-amd64 x86_64
-          ls -lh output/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: void-glibc-rootfs
-          path: output/*.tar.gz
-          retention-days: 3
-
-  build-debian:
-    needs: check-update
-    if: needs.check-update.outputs.needs-build == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build Debian latest slim (ultra thin) rootfs
-        run: |
-          echo "Building Debian slim Rootfs for Termix"
-          mkdir -p output
-          PACKAGES="fastfetch curl git gh bash openssh-client ca-certificates"
-
-          build_one() {
-            local platform="$1" name="$2" arch="$3"
-            echo "Debian slim $arch"
-            docker pull --platform "$platform" debian:slim
-            docker run -d --platform "$platform" --name "$name" debian:slim sleep 3600
-            docker exec "$name" /bin/sh -c "
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update
-              apt-get install -y --no-install-recommends $PACKAGES
-              apt-get autoremove -y --purge
-              apt-get clean
-              ln -sf /bin/bash /bin/sh
-              rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
-                     /tmp/* /var/tmp/* /var/log/* \
-                     /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
-                     /usr/share/lintian/* /usr/share/locale/* \
-                     /usr/share/zsh /usr/share/gcc /usr/share/gdb
-            "
-            docker stop "$name"
-            docker export "\( name" -o "output/debian-slim-rootfs- \){arch}.tar"
-            docker rm "$name"
-            tar --delete -f "output/debian-slim-rootfs-${arch}.tar" dev .dockerenv etc/hostname etc/hosts etc/resolv.conf || true
-            gzip -f "output/debian-slim-rootfs-${arch}.tar"
-            echo "  $arch: \( (du -h output/debian-slim-rootfs- \){arch}.tar.gz | cut -f1)"
-          }
-
-          build_one linux/arm64 debian-arm64 aarch64
-          build_one linux/amd64 debian-amd64 x86_64
-          ls -lh output/
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: debian-slim-rootfs
-          path: output/*.tar.gz
-          retention-days: 3
-
-  release:
-    needs: [check-update, build-wolfi, build-void, build-debian]
-    if: needs.check-update.outputs.needs-build == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all rootfs artifacts
+      - name: Download all built artifacts
         uses: actions/download-artifact@v4
         with:
-          path: output
+          path: release-assets
           merge-multiple: true
+
+      - name: Generate Checksums
+        working-directory: release-assets
+        run: |
+          sha256sum *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.version || format('wolfi-{0}', needs.check-update.outputs.short_digest) }}
-          name: ${{ github.event.inputs.version || format('Wolfi + Void + Debian Rootfs (Update {0})', needs.check-update.outputs.short_digest) }}
+          tag_name: ${{ github.event.inputs.version || needs.check-update.outputs.release_tag }}
+          name: ${{ github.event.inputs.version || format('Multi-Distro Rootfs ({0})', needs.check-update.outputs.release_tag) }}
           body: |
-            Rootfs tarballs for Termux / proot-distro (glibc, terminal only, ultra thin).
+            ### 🌐 Lightweight Multi-Architecture Rootfs for Termix & PRoot
 
-            Triggered from Wolfi `cgr.dev/chainguard/wolfi-base:latest` (Digest: `${{ needs.check-update.outputs.short_digest }}`)
+            Automated build supporting `aarch64` (ARM64) and `x86_64` (AMD64).
 
-            Also built:
-            - `ghcr.io/void-linux/void-glibc-busybox:latest` (thinnest official Void glibc)
-            - `debian:slim` (latest stable slim)
+            ---
 
-            ### Pre-installed
-            `fastfetch` `curl` `git` `gh` `bash` `openssh`
+            ### 📦 Included Distributions & Default Tooling
 
-            | Distro | Install more with |
-            |--------|-------------------|
-            | Wolfi | `apk add <pkg>` |
-            | Void glibc busybox | `xbps-install -S <pkg>` |
-            | Debian slim | `apt install <pkg>` |
+            | Distribution | Base Image | Package Manager | Pre-installed Packages |
+            | :--- | :--- | :--- | :--- |
+            | **Wolfi Linux** | `cgr.dev/chainguard/wolfi-base` | `apk` | `fastfetch`, `curl`, `git`, `gh`, `bash`, `openssh` |
+            | **Debian Slim** | `debian:bookworm-slim` | `apt` | `curl`, `git`, `bash`, `openssh-client`, `procps`, `less`, `nano` |
+            | **Void Linux** | `ghcr.io/void-linux/void-linux` | `xbps` | `curl`, `git`, `bash`, `openssh`, `less`, `nano` |
 
-            ### Downloads
+            ---
 
-            | File | Distro | Arch | Use for |
-            |------|--------|------|---------|
-            | `wolfi-rootfs-aarch64.tar.gz` | Wolfi | ARM64 | phones |
-            | `wolfi-rootfs-x86_64.tar.gz` | Wolfi | x86_64 | emulators, ChromeOS |
-            | `void-glibc-rootfs-aarch64.tar.gz` | Void glibc busybox | ARM64 | phones |
-            | `void-glibc-rootfs-x86_64.tar.gz` | Void glibc busybox | x86_64 | emulators, ChromeOS |
-            | `debian-slim-rootfs-aarch64.tar.gz` | Debian slim | ARM64 | phones |
-            | `debian-slim-rootfs-x86_64.tar.gz` | Debian slim | x86_64 | emulators, ChromeOS |
+            ### 🗂️ Available Files
 
-            ### Termux
+            * `wolfi-rootfs-aarch64.tar.gz` / `wolfi-rootfs-x86_64.tar.gz`
+            * `debian-rootfs-aarch64.tar.gz` / `debian-rootfs-x86_64.tar.gz`
+            * `void-rootfs-aarch64.tar.gz` / `void-rootfs-x86_64.tar.gz`
+            * `SHA256SUMS.txt` (Integrity checksums)
 
-            ```bash
-            pkg install proot-distro
-            proot-distro install ./wolfi-rootfs-aarch64.tar.gz --name wolfi
-            proot-distro install ./void-glibc-rootfs-aarch64.tar.gz --name void
-            proot-distro install ./debian-slim-rootfs-aarch64.tar.gz --name debian
-            proot-distro login wolfi
-            ```
-
-            > These images do not support ARM32 (armv7).
-          files: output/*.tar.gz
+            > Cleaned for terminal emulators: `.dockerenv` removed, dynamic `/dev` unlinked, and fallback DNS configured (`1.1.1.1`, `8.8.8.8`).
+          files: release-assets/*
           draft: false
           prerelease: false
         env:
