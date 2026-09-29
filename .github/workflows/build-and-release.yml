@@ -3,19 +3,13 @@ name: Build & Release Rootfs (Wolfi, Void, Debian)
 on:
   workflow_dispatch:
     inputs:
-      distro:
-        description: 'Which distro to build'
-        required: false
-        default: 'all'
-        type: choice
-        options: [all, wolfi, void, debian]
       version:
-        description: 'Version tag prefix (Optional: leave empty to auto-generate from image digest)'
+        description: 'Release tag (Optional: leave empty to auto-generate from image digests)'
         required: false
         default: ''
 
   schedule:
-    # Daily check; only builds distros whose base image digest changed
+    # Daily check; builds only if any of the three base images changed
     - cron: '0 0 * * *'
 
 permissions:
@@ -25,72 +19,75 @@ jobs:
   check-update:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.check.outputs.matrix }}
-      has_builds: ${{ steps.check.outputs.has_builds }}
+      needs_build: ${{ steps.check.outputs.needs_build }}
+      tag: ${{ steps.check.outputs.tag }}
+      wolfi_digest: ${{ steps.check.outputs.wolfi_digest }}
+      void_digest: ${{ steps.check.outputs.void_digest }}
+      debian_digest: ${{ steps.check.outputs.debian_digest }}
     steps:
       - name: Check base image digests
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          declare -A IMAGES=(
-            [wolfi]="cgr.dev/chainguard/wolfi-base:latest"
-            [void]="ghcr.io/void-linux/void-glibc:latest"
-            [debian]="docker.io/library/debian:stable-slim"
-          )
+          short_digest() {
+            skopeo inspect "docker://$1" | jq -r '.Digest' | cut -d':' -f2 | cut -c1-12
+          }
 
-          SELECTED="${{ github.event.inputs.distro || 'all' }}"
-          MANUAL="${{ github.event_name == 'workflow_dispatch' }}"
+          WOLFI=$(short_digest cgr.dev/chainguard/wolfi-base:latest)
+          VOID=$(short_digest ghcr.io/void-linux/void-glibc:latest)
+          DEBIAN=$(short_digest docker.io/library/debian:stable-slim)
+
+          echo "wolfi:  $WOLFI"
+          echo "void:   $VOID"
+          echo "debian: $DEBIAN"
+
+          echo "wolfi_digest=$WOLFI"   >> $GITHUB_OUTPUT
+          echo "void_digest=$VOID"     >> $GITHUB_OUTPUT
+          echo "debian_digest=$DEBIAN" >> $GITHUB_OUTPUT
+
+          # Tag: manual version (sanitized) or hash of all three digests
           VERSION="${{ github.event.inputs.version }}"
-          MATRIX="[]"
+          VERSION=$(printf '%s' "$VERSION" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//; s/-*$//')
 
-          for DISTRO in wolfi void debian; do
-            if [ "$SELECTED" != "all" ] && [ "$SELECTED" != "$DISTRO" ]; then
-              continue
-            fi
-
-            IMAGE="${IMAGES[$DISTRO]}"
-            DIGEST=$(skopeo inspect "docker://$IMAGE" | jq -r '.Digest')
-            SHORT=$(echo "$DIGEST" | cut -d':' -f2 | cut -c1-12)
-
-            if [ -n "$VERSION" ]; then
-              TAG="${VERSION}-${DISTRO}"
-            else
-              TAG="${DISTRO}-${SHORT}"
-            fi
-
-            echo "[$DISTRO] digest: $SHORT"
-
-            if [ "$MANUAL" != "true" ] && gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
-              echo "✅ [$DISTRO] release $TAG already exists. Skipping."
-              continue
-            fi
-
-            echo "🚨 [$DISTRO] build required ($TAG)"
-            MATRIX=$(echo "$MATRIX" | jq -c --arg d "$DISTRO" --arg i "$IMAGE" --arg s "$SHORT" --arg t "$TAG" \
-              '. + [{distro:$d, image:$i, short_digest:$s, tag:$t}]')
-          done
-
-          if [ "$MATRIX" = "[]" ]; then
-            echo "has_builds=false" >> $GITHUB_OUTPUT
+          if [ -n "$VERSION" ]; then
+            TAG="$VERSION"
           else
-            echo "has_builds=true" >> $GITHUB_OUTPUT
+            COMBINED=$(printf '%s' "$WOLFI$VOID$DEBIAN" | sha256sum | cut -c1-12)
+            TAG="rootfs-$COMBINED"
           fi
-          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "Manual trigger. Forcing build."
+            echo "needs_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "✅ Release $TAG already exists. Skipping build."
+            echo "needs_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "🚨 Base image update detected. Build required ($TAG)."
+            echo "needs_build=true" >> $GITHUB_OUTPUT
+          fi
 
   build:
     needs: check-update
-    if: needs.check-update.outputs.has_builds == 'true'
+    if: needs.check-update.outputs.needs_build == 'true'
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
-        include: ${{ fromJson(needs.check-update.outputs.matrix) }}
+        include:
+          - distro: wolfi
+            image: cgr.dev/chainguard/wolfi-base:latest
+          - distro: void
+            image: ghcr.io/void-linux/void-glibc:latest
+          - distro: debian
+            image: docker.io/library/debian:stable-slim
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -105,7 +102,6 @@ jobs:
           echo "🐧 Building $DISTRO rootfs from $IMAGE"
           mkdir -p output
 
-          # Per-distro install command (terminal-only, minimal)
           case "$DISTRO" in
             wolfi)
               INSTALL='apk update && apk upgrade && apk add --no-cache fastfetch curl git gh bash openssh \
@@ -114,8 +110,7 @@ jobs:
               ;;
             void)
               INSTALL='xbps-install -Syu xbps && xbps-install -Syu \
-                && xbps-install -y fastfetch curl git github-cli bash openssh ca-certificates \
-                && xbps-remove -Oo -y || true; \
+                && xbps-install -y fastfetch curl git github-cli bash openssh ca-certificates; \
                 rm -rf /var/cache/xbps/* /tmp/* /var/tmp/* /var/log/*'
               ;;
             debian)
@@ -146,74 +141,58 @@ jobs:
           build_arch aarch64 linux/arm64
           build_arch x86_64 linux/amd64
 
-          echo ""
           ls -lh output/
+
+      - name: Upload ${{ matrix.distro }} artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-${{ matrix.distro }}
+          path: output/*.tar.gz
+          retention-days: 3
+
+  release:
+    needs: [check-update, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: rootfs-*
+          path: output
+          merge-multiple: true
 
       - name: Prepare release notes
         env:
-          DISTRO: ${{ matrix.distro }}
-          IMAGE: ${{ matrix.image }}
-          SHORT: ${{ matrix.short_digest }}
+          WOLFI: ${{ needs.check-update.outputs.wolfi_digest }}
+          VOID: ${{ needs.check-update.outputs.void_digest }}
+          DEBIAN: ${{ needs.check-update.outputs.debian_digest }}
         run: |
-          case "$DISTRO" in
-            wolfi)
-              TITLE="Wolfi Linux (musl-free glibc, apk)"
-              PKGS='`fastfetch` `curl` `git` `gh` `bash` `openssh`'
-              MORE='apk add <package>'
-              EXTRA='> ⚠️ Wolfi does not support ARM32 (armv7).'
-              ;;
-            void)
-              TITLE="Void Linux (glibc, xbps)"
-              PKGS='`fastfetch` `curl` `git` `github-cli` `bash` `openssh`'
-              MORE='xbps-install -S <package>'
-              EXTRA='> ℹ️ glibc variant of Void Linux.'
-              ;;
-            debian)
-              TITLE="Debian stable-slim (glibc, apt)"
-              PKGS='`fastfetch` `curl` `git` `gh` `bash` `openssh-client`'
-              MORE='apt update && apt install <package>'
-              EXTRA='> ℹ️ Based on `debian:stable-slim`, docs and man pages stripped.'
-              ;;
-          esac
+          ls -lh output/
 
           cat > release-body.md <<EOF
-          🐧 **$TITLE Rootfs for Termix**
+          🐧 **Linux Rootfs Collection for Termix**
 
-          Built from \`$IMAGE\` (Digest: \`$SHORT\`)
+          Terminal-only, minimal rootfs images for **ARM64** and **x86_64**.
 
           ### 📦 Pre-installed packages
-          $PKGS
-
-          Install more with:
-          \`\`\`bash
-          $MORE
-          \`\`\`
+          \`fastfetch\` \`curl\` \`git\` \`gh\` \`bash\` \`openssh\`
 
           ### 📥 Downloads
 
-          | File | Architecture | Use for |
-          |------|-------------|---------|
-          | \`${DISTRO}-rootfs-aarch64.tar.gz\` | ARM64 | Most modern Android phones |
-          | \`${DISTRO}-rootfs-x86_64.tar.gz\` | x86_64 | Emulators, ChromeOS |
+          | Distro | ARM64 (phones) | x86_64 (emulators, ChromeOS) | Base digest | Install more |
+          |--------|----------------|------------------------------|-------------|--------------|
+          | Wolfi (glibc) | \`wolfi-rootfs-aarch64.tar.gz\` | \`wolfi-rootfs-x86_64.tar.gz\` | \`$WOLFI\` | \`apk add <pkg>\` |
+          | Void (glibc) | \`void-rootfs-aarch64.tar.gz\` | \`void-rootfs-x86_64.tar.gz\` | \`$VOID\` | \`xbps-install -S <pkg>\` |
+          | Debian slim | \`debian-rootfs-aarch64.tar.gz\` | \`debian-rootfs-x86_64.tar.gz\` | \`$DEBIAN\` | \`apt install <pkg>\` |
 
-          $EXTRA
+          > ⚠️ Wolfi does not support ARM32 (armv7).
           EOF
-
-          # Strip heredoc indentation
-          sed -i 's/^          //' release-body.md
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.distro }}-rootfs-${{ github.run_id }}
-          path: output/*.tar.gz
-          retention-days: 3
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ matrix.tag }}
-          name: ${{ matrix.distro }} Rootfs (${{ matrix.tag }})
+          tag_name: ${{ needs.check-update.outputs.tag }}
+          name: Rootfs Collection (${{ needs.check-update.outputs.tag }})
           body_path: release-body.md
           files: output/*.tar.gz
           draft: false
