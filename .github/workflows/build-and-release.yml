@@ -102,6 +102,12 @@ jobs:
           echo "🐧 Building $DISTRO rootfs from $IMAGE"
           mkdir -p output
 
+          # Tar the filesystem from *inside* the container. `docker export` can
+          # write a stale size/mtime for files the package manager replaced at
+          # the end of the install, which produces a malformed tar and a
+          # truncated package database (xbps: "cannot access to pkgdb").
+          ARCHIVE='cd / && tar --exclude=dev --exclude=proc/* --exclude=sys/* --exclude=etc/hosts --exclude=etc/resolv.conf --exclude=etc/hostname --exclude=.dockerenv --exclude=rootfs.tar -cf /rootfs.tar $(ls -A)'
+
           case "$DISTRO" in
             wolfi)
               INSTALL='apk update && apk upgrade && apk add --no-cache fastfetch curl git gh bash openssh \
@@ -110,7 +116,7 @@ jobs:
               ;;
             void)
               INSTALL='xbps-install -Syu xbps && xbps-install -Syu \
-                && xbps-install -y fastfetch curl git github-cli bash openssh ca-certificates; \
+                && xbps-install -y fastfetch curl git github-cli bash openssh ca-certificates tar; \
                 rm -rf /var/cache/xbps/* /tmp/* /var/tmp/* /var/log/*'
               ;;
             debian)
@@ -130,10 +136,10 @@ jobs:
             docker pull --platform "$PLATFORM" "$IMAGE"
             docker run -d --platform "$PLATFORM" --name "$CONTAINER" "$IMAGE" sleep 3600
             docker exec "$CONTAINER" /bin/sh -c "$INSTALL"
+            docker exec "$CONTAINER" /bin/sh -c "$ARCHIVE"
             docker stop "$CONTAINER"
-            docker export "$CONTAINER" -o "output/${DISTRO}-rootfs-${NAME}.tar"
+            docker cp "$CONTAINER:/rootfs.tar" "output/${DISTRO}-rootfs-${NAME}.tar"
             docker rm "$CONTAINER"
-            tar --delete -f "output/${DISTRO}-rootfs-${NAME}.tar" dev .dockerenv etc/hostname etc/hosts etc/resolv.conf || true
             gzip -f "output/${DISTRO}-rootfs-${NAME}.tar"
             echo "   ✅ $NAME: $(du -h output/${DISTRO}-rootfs-${NAME}.tar.gz | cut -f1)"
           }
@@ -142,6 +148,26 @@ jobs:
           build_arch x86_64 linux/amd64
 
           ls -lh output/
+
+      - name: Verify ${{ matrix.distro }} rootfs
+        run: |
+          set -e
+          for f in output/*.tar.gz; do
+            echo "🔍 checking $f"
+            tar -tzf "$f" > /dev/null
+            if tar -tzf "$f" | grep -q '\.l2s\.'; then
+              echo "::error::busybox tar left hardlink temp files in $f"
+              exit 1
+            fi
+          done
+          python3 - <<'PY'
+          import glob, plistlib, tarfile
+          for f in sorted(glob.glob('output/void-rootfs-*.tar.gz')):
+              with tarfile.open(f) as t:
+                  db = plistlib.load(t.extractfile('var/db/xbps/pkgdb-0.38.plist'))
+              assert db, f + ': empty pkgdb'
+              print(f, len(db), 'packages in pkgdb')
+          PY
 
       - name: Upload ${{ matrix.distro }} artifacts
         uses: actions/upload-artifact@v4
