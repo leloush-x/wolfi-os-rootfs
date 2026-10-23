@@ -187,6 +187,11 @@ jobs:
           path: output
           merge-multiple: true
 
+      - name: Generate SHA-256 manifest
+        run: |
+          cd output
+          sha256sum ./*.tar.gz > SHA256SUMS
+
       - name: Prepare release notes
         env:
           WOLFI: ${{ needs.check-update.outputs.wolfi_digest }}
@@ -220,7 +225,9 @@ jobs:
           tag_name: ${{ needs.check-update.outputs.tag }}
           name: Rootfs Collection (${{ needs.check-update.outputs.tag }})
           body_path: release-body.md
-          files: output/*.tar.gz
+          files: |
+            output/*.tar.gz
+            output/SHA256SUMS
           draft: false
           prerelease: false
         env:
