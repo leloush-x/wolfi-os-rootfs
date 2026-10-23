@@ -110,19 +110,19 @@ jobs:
 
           case "$DISTRO" in
             wolfi)
-              INSTALL='apk update && apk upgrade && apk add --no-cache fastfetch curl git gh bash openssh \
+              INSTALL='apk update && apk upgrade && apk add --no-cache fastfetch curl git gh bash openssh procps \
                 && ln -sf /bin/bash /bin/sh \
                 && rm -rf /var/cache/apk/* /tmp/* /var/tmp/* /var/log/*'
               ;;
             void)
               INSTALL='xbps-install -Syu xbps && xbps-install -Syu \
-                && xbps-install -y fastfetch curl git github-cli bash openssh ca-certificates tar; \
+                && xbps-install -y fastfetch curl git github-cli bash openssh ca-certificates tar procps-ng; \
                 rm -rf /var/cache/xbps/* /tmp/* /var/tmp/* /var/log/*'
               ;;
             debian)
               INSTALL='export DEBIAN_FRONTEND=noninteractive \
                 && apt-get update && apt-get upgrade -y \
-                && apt-get install -y --no-install-recommends fastfetch curl git gh bash openssh-client ca-certificates \
+                && apt-get install -y --no-install-recommends fastfetch curl git gh bash openssh-client ca-certificates procps \
                 && apt-get clean \
                 && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /tmp/* /var/tmp/* /var/log/*'
               ;;
@@ -136,6 +136,7 @@ jobs:
             docker pull --platform "$PLATFORM" "$IMAGE"
             docker run -d --platform "$PLATFORM" --name "$CONTAINER" "$IMAGE" sleep 3600
             docker exec "$CONTAINER" /bin/sh -c "$INSTALL"
+            docker exec "$CONTAINER" /bin/sh -ec 'ps -p 1 -o stat= -o lstart= >/dev/null'
             docker exec "$CONTAINER" /bin/sh -c "$ARCHIVE"
             docker stop "$CONTAINER"
             docker cp "$CONTAINER:/rootfs.tar" "output/${DISTRO}-rootfs-${NAME}.tar"
@@ -206,7 +207,7 @@ jobs:
           Terminal-only, minimal rootfs images for **ARM64** and **x86_64**.
 
           ### 📦 Pre-installed packages
-          \`fastfetch\` \`curl\` \`git\` \`gh\` \`bash\` \`openssh\`
+          \`fastfetch\` \`curl\` \`git\` \`gh\` \`bash\` \`openssh\` \`procps\`
 
           ### 📥 Downloads
 
